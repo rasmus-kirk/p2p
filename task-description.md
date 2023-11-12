@@ -42,7 +42,7 @@ stop typing, then eventually all clients will print the same set of strings?
 Modify your code from Exercise A to add the following features:
 
 1. The system now no longer broadcasts strings and prints them. Instead it
-   implements a distributed ledger. Each client keeps a Ledger that keeps
+   implements a distributed ledger. Each client keeps a `Ledger` that keeps
    track of `Account`s and their balancers.
 2. Each client can make `Transaction`s. When they do all other peers eventually
    update their ledger with the transaction.

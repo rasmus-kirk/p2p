@@ -1,0 +1,67 @@
+syntax = "proto3";
+
+package p2p;
+
+service Proto {
+  // Request the peers of this node.
+  rpc GetPeers(Unit) returns (Peers);
+  rpc Send(Transaction) returns (Unit);
+  rpc GetLedger(Unit) returns (Ledger);
+}
+
+// The unit type, an empty message
+message Unit {}
+
+// The self-proclaimed ID of a peer
+message PeerId {
+  string val = 1;
+}
+
+// An account.
+message Account {
+  string val = 1;
+}
+
+// A DKK amount
+message Amount {
+  uint64 val = 1;
+}
+
+// A transaction
+message Transaction {
+  PeerId from = 1;
+  PeerId to = 2;
+  Amount amount = 3;
+}
+
+// A network socket address
+message SocketAddress {
+  Ip ip = 1;
+  Port port = 2;
+}
+
+// An IP
+message Ip {
+  string val = 1;
+} 
+
+// A port
+message Port {
+  string val = 1;
+} 
+
+// A peer in the network.
+message Peer {
+  PeerId id = 1;
+  SocketAddress address = 2;
+}
+
+// A peer in the network.
+message Peers {
+  repeated Peer peers = 1;
+}
+
+// Maps Accounts to Amounts
+message Ledger {
+  map<string, Amount> ledger = 1;
+}
