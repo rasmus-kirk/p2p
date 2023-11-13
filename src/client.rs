@@ -1,80 +1,87 @@
-use std::{net::{SocketAddr, Ipv4Addr, IpAddr}, collections::HashSet, io};
+use std::{net::{SocketAddr, Ipv4Addr, IpAddr}, collections::{HashSet, HashMap}, io, sync::Arc};
 
 use bincode::{serialize, deserialize};
 use rand::Rng;
 use tokio::{net::{TcpListener, tcp::{OwnedWriteHalf, OwnedReadHalf}, TcpStream}, sync::mpsc::{Sender, channel, Receiver}};
+use anyhow::anyhow;
+use dashmap::*;
+
 use crate::types::*;
-
-//mod grpc_server;
-use crate::grpc_server::*;
-
 use crate::macros::*;
 
 struct ClientManager {}
+
+#[derive(Clone)]
+struct State {
+    history: Arc<DashSet<AccountTransaction>>,
+    ledger: Ledger,
+    tx: Sender<ManReq>
+}
 
 impl ClientManager {
     fn init() -> Sender<ManReq> {
         // Create a mpsc channel for managing writes.
         let (tx, rx) = channel::<ManReq>(100);
         let tx_clone = tx.clone();
+        let state = State {
+            history: Arc::new(DashSet::new()),
+            ledger: Ledger::new(),
+            tx
+        };
 
         // Spawn the manager loop
         tokio::spawn(async move {
-            Self::start_loop(rx, tx).await;
+            Self::start_loop(rx, state).await;
         });
 
         // Return sender handle
         tx_clone
     }
 
-    async fn start_loop(mut rx: Receiver<ManReq>, tx: Sender<ManReq>) {
-        let mut peers = Vec::<OwnedWriteHalf>::new();
-        let mut history = HashSet::<AccountTransaction>::new();
-        let mut ledger = Ledger::new();
+    async fn start_loop(mut rx: Receiver<ManReq>, state: State) {
+        let mut peers = HashMap::<SocketAddr, OwnedWriteHalf>::new();
 
         loop {
             match rx.recv().await {
                 // A broadcast request was received.
                 Some(ManReq::Broadcast(trx)) => {
-                    if !history.contains(&trx) {
+                    if !state.history.contains(&trx) {
                         println!("{:}", trx);
 
-                        skip_fail!(ledger.update(&trx));
+                        skip_fail!(state.ledger.update(&trx));
 
-                        for conn in peers.iter() {
+                        for conn in peers.values() {
                             skip_fail!(Self::send(conn, &trx).await)
                         }
                     }
 
-                    history.insert(trx);
+                    state.history.insert(trx);
                 }
                 // A connection request was received.
                 Some(ManReq::Connect(stream)) => {
-                    let tx = tx.clone();
                     let (read_stream, write_stream) = stream.into_split();
+                    let state = state.clone();
+                    let peer_addr = skip_fail!(write_stream.peer_addr());
 
-                    peers.push(write_stream);
+                    peers.insert(peer_addr, write_stream);
 
                     info!(
                         "Established connection with: {:#}",
-                        skip_fail!(read_stream.peer_addr())
+                        peer_addr
                     );
 
-                    // TODO: Add Peer to ledger. How do I get the ID from peer?
-
                     tokio::spawn(async move {
-                        Self::handle_peer_stream(read_stream, tx).await;
+                        Self::handle_peer_stream(read_stream, state).await;
                     });
                 }
                 // A list peers request was received.
                 Some(ManReq::ListPeers) => {
-                    let peers: Vec<SocketAddr> =
-                        peers.iter().filter_map(|x| x.peer_addr().ok()).collect();
+                    let peers: Vec<SocketAddr> = peers.keys().map(|x| x.clone()).collect();
                     println!("{:?}", peers);
                 }
                 // A list peers request was received.
                 Some(ManReq::ListBalances) => {
-                    println!("{}", ledger);
+                    println!("{}", state.ledger);
                 }
                 None => break,
             }
@@ -92,7 +99,7 @@ impl ClientManager {
         Ok(())
     }
 
-    async fn handle_peer_stream(read_stream: OwnedReadHalf, tx: Sender<ManReq>) {
+    async fn handle_peer_stream(read_stream: OwnedReadHalf, state: State) {
         loop {
             let mut buf = [0; 4096];
 
@@ -104,10 +111,10 @@ impl ClientManager {
                     break;
                 }
                 Ok(bytes_read) => {
-                    trace!("Read {:?} bytes with the following message:", bytes_read);
+                    trace!("Read {:?} bytes.", bytes_read);
 
-                    let trx = skip_fail!(deserialize(&buf));
-                    skip_fail!(tx.send(ManReq::Broadcast(trx)).await);
+                    let request = skip_fail!(Self::handle_packet(&buf));
+                    skip_fail!(state.tx.send(request).await)
                 }
                 Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => {
                     debug!("Entered would_block");
@@ -117,6 +124,15 @@ impl ClientManager {
                     error!("{:?}", e);
                 }
             }
+        }
+    }
+
+    fn handle_packet(bytes: &[u8]) -> anyhow::Result<ManReq> {
+        let packet: Packet = deserialize(bytes)?;
+
+        match packet {
+            Packet::Transaction(trx) => Ok(ManReq::Broadcast(trx)),
+            Packet::RpcCall(_) => Err(anyhow!("Unimplemented")),
         }
     }
 }
@@ -196,4 +212,8 @@ impl Client {
 
         Ok(())
     }
+}
+
+struct PeerConn {
+    rx: Receiver<PeerReq> 
 }

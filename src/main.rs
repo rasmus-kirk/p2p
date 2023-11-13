@@ -2,7 +2,6 @@ use std::io::Write;
 
 mod types;
 mod client;
-mod grpc_server;
 
 use types::*;
 use client::*;

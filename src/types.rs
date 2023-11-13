@@ -1,6 +1,7 @@
-use std::{fmt, net::SocketAddr, str::FromStr, collections::HashMap};
+use std::{fmt, net::SocketAddr, str::FromStr, collections::HashMap, sync::Arc};
 use serde::{Serialize, Deserialize};
 use tokio::net::TcpStream;
+use dashmap::DashMap;
 
 #[derive(Eq, PartialEq, Hash, Clone, Serialize, Deserialize, Debug)]
 pub struct Id(pub String);
@@ -77,15 +78,26 @@ pub enum ManReq {
     ListBalances,
 }
 
-//pub type Ledger = HashMap<Id, Amount>;
-pub struct Ledger(HashMap<Id, Amount>);
+#[derive(Eq, PartialEq, Clone, Hash, Serialize, Deserialize)]
+pub enum Packet {
+    Transaction(AccountTransaction),
+    RpcCall(RpcCall)
+}
+
+#[derive(Eq, PartialEq, Clone, Hash, Serialize, Deserialize)]
+pub enum RpcCall {
+    GetPeers,
+}
+
+#[derive(Clone)]
+pub struct Ledger(Arc<DashMap<Id, Amount>>);
 
 impl Ledger {
     pub fn new() -> Ledger {
-        Ledger(HashMap::<Id, Amount>::new())
+        Ledger(Arc::new(DashMap::new()))
     }
 
-    pub fn update(&mut self, trx: &AccountTransaction) -> anyhow::Result<()> {
+    pub fn update(&self, trx: &AccountTransaction) -> anyhow::Result<()> {
         let from_amount = self.0
             .get(&trx.from)
             .ok_or(anyhow::anyhow!(
@@ -108,8 +120,8 @@ impl Ledger {
 
 impl fmt::Display for Ledger {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        for (k, v) in self.0.iter() {
-            write!(f, "{}, {}, \n", k, v)?
+        for i in self.0.iter() {
+            write!(f, "{}, {}, \n", i.key(), i.value())?
         }
 
         Ok(())
