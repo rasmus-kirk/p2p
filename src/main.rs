@@ -1,8 +1,10 @@
-use std::io::Write;
+use std::{io::Write, net::SocketAddr, str::FromStr};
 
 mod types;
 mod client;
+mod peer;
 
+use peer::*;
 use types::*;
 use client::*;
 
@@ -50,18 +52,18 @@ async fn main() -> anyhow::Result<()> {
             Some(&":connect") => {
                 verify_len!(":connect", input.len(), 2);
 
-                let peer = skip_fail!(Peer::new(input[1]));
+                let peer = skip_fail!(SocketAddr::from_str(input[1].trim()));
                 skip_fail!(client.connect(peer).await);
             }
             Some(&":peers") => {
                 verify_len!(":peers", input.len(), 1);
 
-                skip_fail!(client.list_peers().await);
+                println!("{}", client.get_peers());
             }
             Some(&":balances") => {
                 verify_len!(":balances", input.len(), 1);
 
-                skip_fail!(client.list_balances().await);
+                println!("{}", client.get_ledger());
             }
             Some(&":exit") => {
                 verify_len!(":exit", input.len(), 1);

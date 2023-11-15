@@ -1,7 +1,9 @@
 use std::{fmt, net::SocketAddr, str::FromStr, collections::HashMap, sync::Arc};
 use serde::{Serialize, Deserialize};
-use tokio::net::TcpStream;
-use dashmap::DashMap;
+use tokio::{net::TcpStream, sync::mpsc::Sender};
+use dashmap::{DashMap, DashSet};
+
+use crate::*;
 
 #[derive(Eq, PartialEq, Hash, Clone, Serialize, Deserialize, Debug)]
 pub struct Id(pub String);
@@ -9,19 +11,6 @@ pub struct Id(pub String);
 impl fmt::Display for Id {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         write!(f, "{}", self.0)
-    }
-}
-
-#[derive(Eq, PartialEq, Clone, Hash, Serialize, Deserialize)]
-pub struct Peer {
-    pub socket: SocketAddr,
-}
-
-impl Peer {
-    pub fn new(socket_string: &str) -> anyhow::Result<Self> {
-        Ok(Self {
-            socket: SocketAddr::from_str(socket_string.trim())?,
-        })
     }
 }
 
@@ -81,7 +70,20 @@ pub enum ManReq {
 #[derive(Eq, PartialEq, Clone, Hash, Serialize, Deserialize)]
 pub enum Packet {
     Transaction(AccountTransaction),
-    RpcCall(RpcCall)
+    Response(PeerResponse),
+    Request(PeerReq)
+}
+
+#[derive(Eq, PartialEq, Clone, Hash, Serialize, Deserialize)]
+pub enum PeerReq {
+    GetPeers,
+    Broadcast(AccountTransaction)
+}
+
+
+#[derive(Eq, PartialEq, Clone, Hash, Serialize, Deserialize)]
+pub enum PeerResponse {
+    GetPeers(Vec<SocketAddr>)
 }
 
 #[derive(Eq, PartialEq, Clone, Hash, Serialize, Deserialize)]
@@ -127,3 +129,65 @@ impl fmt::Display for Ledger {
         Ok(())
     }
 }
+
+#[derive(Clone)]
+pub struct Peers(Arc<DashSet<Peer>>);
+
+impl Peers {
+    pub fn new() -> Peers {
+        Peers(Arc::new(DashSet::new()))
+    }
+
+    pub fn insert(&self, peer: Peer) -> bool {
+        self.0.insert(peer)
+    }
+
+    pub fn into_iter(&self) -> dashmap::iter_set::OwningIter<Peer, std::collections::hash_map::RandomState> {
+        self.0.into_iter()
+    }
+
+    pub fn iter(&self) -> dashmap::iter_set::Iter<'_, Peer, std::collections::hash_map::RandomState, DashMap<Peer, ()>> {
+        self.0.iter()
+    }
+
+    pub fn to_vec(&self) -> Vec<SocketAddr> {
+        self.iter().map(|x| x.address).collect()
+    }
+}
+
+impl fmt::Display for Peers {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        for i in self.0.iter() {
+            write!(f, "{}, \n", i.key())?
+        }
+
+        Ok(())
+    }
+}
+
+#[derive(Clone)]
+pub struct State {
+    pub history: Arc<DashSet<AccountTransaction>>,
+    pub ledger: Ledger,
+    pub peers: Peers
+}
+
+impl State {
+    pub fn new() -> State {
+        State {
+            history: Arc::new(DashSet::new()),
+            ledger: Ledger::new(),
+            peers: Peers::new()
+        }
+    }
+
+    pub async fn connect_to_peer(&self, address: SocketAddr) -> anyhow::Result<()> {
+        let stream = TcpStream::connect(address).await?;
+        let peer = Peer::new(self.clone(), stream).await?;
+        self.peers.insert(peer);
+
+        Ok(())
+    }
+}
+
+
