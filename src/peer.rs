@@ -155,7 +155,7 @@ impl PeerConn {
                     tokio::spawn({
                         let peer = self.clone();
                         async move {
-                            peer.handle_packet(&buf).await;
+                            log_fail!(peer.handle_packet(&buf).await);
                         }
                     });
                 }
@@ -177,7 +177,7 @@ impl PeerConn {
             Packet::Transaction(trx) => self.broadcast(trx),
             Packet::Response(PeerResponse::GetPeers(peers)) => {
                 for peer in peers {
-                    self.state.connect_to_peer(peer).await?
+                    //self.state.connect_to_peer(peer).await?
                 }
             }
             Packet::Request(req) => self.sender.send(req).await?
