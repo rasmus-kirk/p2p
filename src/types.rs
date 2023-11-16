@@ -142,8 +142,8 @@ impl Peers {
         self.0.insert(peer)
     }
 
-    pub fn into_iter(&self) -> dashmap::iter_set::OwningIter<Peer, std::collections::hash_map::RandomState> {
-        self.0.into_iter()
+    pub fn clone_iter(&self) -> dashmap::iter_set::OwningIter<Peer, std::collections::hash_map::RandomState> {
+        (*self.0).clone().into_iter()
     }
 
     pub fn iter(&self) -> dashmap::iter_set::Iter<'_, Peer, std::collections::hash_map::RandomState, DashMap<Peer, ()>> {

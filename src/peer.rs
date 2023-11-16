@@ -55,59 +55,70 @@ impl fmt::Display for Peer {
 
 #[derive(Clone)]
 pub struct PeerConn {
-    sender: Sender<PeerReq>
+    sender: Sender<PeerReq>,
+    state: State,
 }
 
 impl PeerConn {
     async fn new(state: State, stream: TcpStream) -> anyhow::Result<PeerConn> {
         // Create a mpsc channel for managing writes.
         let (tx, rx) = channel::<PeerReq>(100);
-        let tx_clone = tx.clone();
         let (read_stream, write_stream) = stream.into_split();
 
         let conn = PeerConn {
-            sender: tx,
+            sender: tx.clone(),
+            state: state.clone()
         };
 
         // Spawn the manager loop
-        let state = state.clone();
-        tokio::spawn(async move {
-            Self::request_handler(state, write_stream, rx).await;
+        tokio::spawn({
+            let conn = conn.clone();
+            async move {
+                conn.request_handler(write_stream, rx).await;
+            }
+        });
+
+        // Spawn the listener loop
+        tokio::spawn({
+            let conn = conn.clone();
+            async move {
+                conn.listen(read_stream).await;
+            }
         });
 
         Ok(conn)
     }
 
-    fn broadcast(state: State, trx: AccountTransaction) {
+    fn broadcast(&self, trx: AccountTransaction) {
+        let conn = self.clone();
         tokio::spawn(async move {
-            if !state.history.contains(&trx) {
+            if !conn.state.history.contains(&trx) {
                 println!("{:}", trx);
 
-                log_fail!(state.ledger.update(&trx));
+                log_fail!(conn.state.ledger.update(&trx));
 
-                for peer in state.peers.iter() {
-                    trx.clone();
+                for peer in conn.state.peers.clone_iter() {
+                    let trx = trx.clone();
                     tokio::spawn(async move {
                         log_fail!(peer.broadcast(trx).await)
-                        //log_fail!(conn.send_channel.send(request).await)
                     });
                 }
             }
 
-            state.history.insert(trx);
+            conn.state.history.insert(trx);
         });
     }
 
-    async fn request_handler(state: State, stream: OwnedWriteHalf, mut rx: Receiver<PeerReq>) {
+    async fn request_handler(self, stream: OwnedWriteHalf, mut rx: Receiver<PeerReq>) {
         loop {
             match rx.recv().await {
                 // A broadcast request was received.
                 Some(PeerReq::Broadcast(trx)) => {
-
+                    self.broadcast(trx)
                 }
                 // A list peers request was received.
                 Some(PeerReq::GetPeers) => {
-                    let peers: Vec<SocketAddr> = state.peers.iter().map(|x| x.address).collect();
+                    let peers = self.state.peers.to_vec();
                     let res = Packet::Response(PeerResponse::GetPeers(peers));
                     skip_fail!(Self::send(&stream, &res).await);
                 }
@@ -127,7 +138,7 @@ impl PeerConn {
         Ok(())
     }
 
-    async fn listen(state: State, read_stream: OwnedReadHalf, tx: Sender<PeerReq>) {
+    async fn listen(self: PeerConn, read_stream: OwnedReadHalf) {
         loop {
             let mut buf = [0; 4096];
 
@@ -141,10 +152,11 @@ impl PeerConn {
                 Ok(bytes_read) => {
                     trace!("Read {:?} bytes.", bytes_read);
 
-                    let state = state.clone();
-                    let tx = tx.clone();
-                    tokio::spawn(async move {
-                        Self::handle_packet(state, &buf, &tx);
+                    tokio::spawn({
+                        let peer = self.clone();
+                        async move {
+                            peer.handle_packet(&buf).await;
+                        }
                     });
                 }
                 Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => {
@@ -158,18 +170,17 @@ impl PeerConn {
         }
     }
 
-    async fn handle_packet(state: State, bytes: &[u8], tx: &Sender<PeerReq>) -> anyhow::Result<()> {
+    async fn handle_packet(&self, bytes: &[u8]) -> anyhow::Result<()> {
         let packet: Packet = deserialize(bytes)?;
 
         match packet {
-            Packet::Transaction(trx) => Self::broadcast(state, trx),
+            Packet::Transaction(trx) => self.broadcast(trx),
             Packet::Response(PeerResponse::GetPeers(peers)) => {
                 for peer in peers {
-                    let stream = TcpStream::connect(peer).await?;
-                    PeerConn::new(state.clone(), stream).await;
+                    self.state.connect_to_peer(peer).await?
                 }
             }
-            Packet::Request(req) => tx.send(req).await?
+            Packet::Request(req) => self.sender.send(req).await?
         }
 
         Ok(())
