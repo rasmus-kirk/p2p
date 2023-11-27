@@ -1,8 +1,11 @@
-use std::{io::Write, net::SocketAddr, str::FromStr};
+#![feature(is_some_and)]
+
+use std::{io::Write, net::SocketAddr, str::FromStr, thread::sleep, time::Duration};
 
 mod types;
 mod client;
 mod peer;
+mod test;
 
 use peer::*;
 use types::*;
@@ -37,15 +40,15 @@ async fn main() -> anyhow::Result<()> {
     println!("Please type in a user name:");
     let username = prompt("");
 
-    let mut client = Client::new(&username)?;
-    client.listen().await;
+    let node= Node::new(&username)?;
 
-    println!("Accepting connections on: {:#}", client.get_address().to_string());
+    sleep(Duration::from_secs(1));
+
+    println!("Accepting connections on: {:#}", node.get_address().to_string());
     println!("Available commands are: ':connect <ip:port>, :peers, :balances, :exit, :send <to> <amount>'");
 
     loop {
         let input = prompt("");
-
         let input: Vec<&str> = input.split_whitespace().collect();
 
         match input.get(0) {
@@ -53,17 +56,17 @@ async fn main() -> anyhow::Result<()> {
                 verify_len!(":connect", input.len(), 2);
 
                 let peer = skip_fail!(SocketAddr::from_str(input[1].trim()));
-                skip_fail!(client.connect(peer).await);
+                skip_fail!(node.connect(peer).await);
             }
             Some(&":peers") => {
                 verify_len!(":peers", input.len(), 1);
 
-                println!("{}", client.get_peers());
+                println!("{:?}: {:?}", node.get_peers().len(), node.get_peers());
             }
             Some(&":balances") => {
                 verify_len!(":balances", input.len(), 1);
 
-                println!("{}", client.get_ledger());
+                println!("{:?}", node.get_ledger());
             }
             Some(&":exit") => {
                 verify_len!(":exit", input.len(), 1);
@@ -74,8 +77,8 @@ async fn main() -> anyhow::Result<()> {
                 verify_len!(":send", input.len(), 3);
 
                 let to = Id(input[1].to_string());
-                let amount = Amount(skip_fail!(input[2].parse()));
-                skip_fail!(client.send(to, amount).await);
+                let amount = skip_fail!(input[2].parse());
+                node.send(to, amount).await;
             }
             Some(_) => {
                 println!("Available commands are: ':connect <ip:port>, :peers, :balances, :exit, :send <to> <amount>'");

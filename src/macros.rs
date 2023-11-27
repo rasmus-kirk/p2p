@@ -3,7 +3,7 @@ macro_rules! skip_fail {
         match $res {
             Ok(val) => val,
             Err(e) => {
-                warn!("An error: {}; skipped.", e);
+                error!("An error: {}; skipped.", e);
                 continue;
             }
         }
@@ -15,7 +15,7 @@ macro_rules! log_fail {
         match $res {
             Ok(val) => val,
             Err(e) => {
-                warn!("An error: {}; skipped.", e)
+                error!("An error: {}; skipped.", e)
             }
         }
     };

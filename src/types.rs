@@ -1,23 +1,25 @@
-use std::{fmt, net::SocketAddr, str::FromStr, collections::HashMap, sync::Arc};
-use serde::{Serialize, Deserialize};
+use std::{fmt, net::SocketAddr, sync::Arc, time::{UNIX_EPOCH, SystemTime}};
+use bincode::{Encode, Decode};
+use rand::seq::SliceRandom;
 use tokio::{net::TcpStream, sync::mpsc::Sender};
 use dashmap::{DashMap, DashSet};
+use anyhow::anyhow;
 
-use crate::*;
+use crate::{*, macros::log_fail};
 
-#[derive(Eq, PartialEq, Hash, Clone, Serialize, Deserialize, Debug)]
+#[derive(Eq, PartialEq, Hash, Clone, Decode, Encode)]
 pub struct Id(pub String);
 
-impl fmt::Display for Id {
+impl fmt::Debug for Id {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         write!(f, "{}", self.0)
     }
 }
 
-#[derive(Copy, Eq, PartialEq, Hash, Clone, Serialize, Deserialize, Debug)]
-pub struct Amount(pub u64);
+#[derive(Copy, Eq, PartialEq, Hash, Clone, Encode, Decode)]
+pub struct Amount(pub i64);
 
-impl fmt::Display for Amount {
+impl fmt::Debug for Amount {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         write!(f, "{}", self.0)
     }
@@ -47,46 +49,54 @@ impl std::ops::Add for Amount {
     }
 }
 
-#[derive(Eq, PartialEq, Hash, Clone, Serialize, Deserialize, Debug)]
+#[derive(Eq, PartialEq, Hash, Clone, Encode, Decode)]
+pub struct Timestamp(u64);
+
+impl fmt::Debug for Timestamp {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        write!(f, "{}", Duration::from_millis(self.0).as_secs())?;
+
+        Ok(())
+    }
+}
+
+impl Timestamp {
+    pub fn since_unix() -> anyhow::Result<Timestamp> {
+        Ok(Timestamp(SystemTime::now().duration_since(UNIX_EPOCH)?.as_millis() as u64))
+    }
+}
+
+#[derive(Eq, PartialEq, Hash, Clone, Decode, Encode)]
 pub struct AccountTransaction {
     pub to: Id,
     pub from: Id,
     pub amount: Amount,
+    pub timestamp: Timestamp
 }
 
 impl fmt::Display for AccountTransaction {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        write!(f, "{} -> {}: {} DKK", self.from, self.to, self.amount)
+        write!(f, "{:?} -> {:?}: {:?} DKK", self.from, self.to, self.amount)
     }
 }
 
-pub enum ManReq {
-    Broadcast(AccountTransaction),
-    Connect(TcpStream),
-    ListPeers,
-    ListBalances,
+impl fmt::Debug for AccountTransaction {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        write!(f, "{:?} -> {:?}: {:?} DKK", self.from, self.to, self.amount)
+    }
 }
 
-#[derive(Eq, PartialEq, Clone, Hash, Serialize, Deserialize)]
+pub type NodeRequest = (Packet, Peer);
+
+#[derive(Eq, PartialEq, Clone, Hash, Decode, Encode, Debug)]
 pub enum Packet {
-    Transaction(AccountTransaction),
-    Response(PeerResponse),
-    Request(PeerReq)
-}
-
-#[derive(Eq, PartialEq, Clone, Hash, Serialize, Deserialize)]
-pub enum PeerReq {
     GetPeers,
-    Broadcast(AccountTransaction)
+    AddPeer(SocketAddr),
+    Broadcast(AccountTransaction),
+    ResponseGetPeers(Vec<SocketAddr>),
 }
 
-
-#[derive(Eq, PartialEq, Clone, Hash, Serialize, Deserialize)]
-pub enum PeerResponse {
-    GetPeers(Vec<SocketAddr>)
-}
-
-#[derive(Eq, PartialEq, Clone, Hash, Serialize, Deserialize)]
+#[derive(Eq, PartialEq, Clone, Hash, Encode, Decode)]
 pub enum RpcCall {
     GetPeers,
 }
@@ -99,94 +109,192 @@ impl Ledger {
         Ledger(Arc::new(DashMap::new()))
     }
 
+    pub fn len(&self) -> usize {
+        self.0.len()
+    }
+
     pub fn update(&self, trx: &AccountTransaction) -> anyhow::Result<()> {
         let from_amount = self.0
             .get(&trx.from)
-            .ok_or(anyhow::anyhow!(
-                "From account does not exist. Invalid transaction"
-            ))?
-            .clone();
+            .map(|x| x.value().clone())
+            .unwrap_or(Amount(0));
         let to_amount = self.0
             .get(&trx.to)
-            .ok_or(anyhow::anyhow!(
-                "To account does not exist. Invalid transaction"
-            ))?
-            .clone();
+            .map(|x| x.value().clone())
+            .unwrap_or(Amount(0));
 
         self.0.insert(trx.from.clone(), from_amount - trx.amount);
-        self.0.insert(trx.to.clone(), to_amount - trx.amount);
+        self.0.insert(trx.to.clone(), to_amount + trx.amount);
 
         Ok(())
     }
 }
 
-impl fmt::Display for Ledger {
+impl fmt::Debug for Ledger {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        write!(f, "[ ")?;
         for i in self.0.iter() {
-            write!(f, "{}, {}, \n", i.key(), i.value())?
+            write!(f, "({:?}, {:?}) ", i.key(), i.value())?
         }
+        write!(f, "]")?;
 
         Ok(())
     }
 }
+
+impl PartialEq for Ledger {
+    fn eq(&self, other: &Self) -> bool {
+        if self.len() != other.len() {
+            return false
+        }
+        self.0.iter().all(|p| other.0.get(p.key()).is_some_and(|q| q.value() == p.value()))
+    }
+}
+
+impl Eq for Ledger {}
 
 #[derive(Clone)]
-pub struct Peers(Arc<DashSet<Peer>>);
+pub struct Peers {
+    active: Arc<DashMap<SocketAddr, Peer>>,
+    inactive: Arc<DashSet<SocketAddr>>,
+    self_address: SocketAddr
+}
 
 impl Peers {
-    pub fn new() -> Peers {
-        Peers(Arc::new(DashSet::new()))
+    pub fn new(self_address: SocketAddr) -> Peers {
+        Peers {
+            active: Arc::new(DashMap::new()),
+            inactive: Arc::new(DashSet::new()),
+            self_address
+        }
     }
 
-    pub fn insert(&self, peer: Peer) -> bool {
-        self.0.insert(peer)
+    pub fn len(&self) -> usize {
+        self.active.len() + self.inactive.len() + 1
     }
 
-    pub fn clone_iter(&self) -> dashmap::iter_set::OwningIter<Peer, std::collections::hash_map::RandomState> {
-        (*self.0).clone().into_iter()
+    pub fn clone_iter(&self) -> dashmap::iter::OwningIter<SocketAddr, Peer> {
+        (*self.active).clone().into_iter()
     }
 
-    pub fn iter(&self) -> dashmap::iter_set::Iter<'_, Peer, std::collections::hash_map::RandomState, DashMap<Peer, ()>> {
-        self.0.iter()
+    pub fn iter(&self) -> dashmap::iter::Iter<'_, SocketAddr, Peer> {
+        self.active.iter()
+    }
+
+    pub fn contains(&self, key: &SocketAddr) -> bool {
+        self.active.contains_key(key) || self.inactive.contains(key) || self.self_address == *key
     }
 
     pub fn to_vec(&self) -> Vec<SocketAddr> {
-        self.iter().map(|x| x.address).collect()
-    }
-}
+        // include self if there is less than 10 peers
+        let mut self_address = vec![];
+        if self.len() < 10 {
+            self_address.push(self.self_address)
+        }
+        let mut peers: Vec<SocketAddr> = self.active
+            .iter()
+            .map(|x| x.key().clone())
+            .chain(self.inactive.iter().map(|x| x.key().clone()))
+            .chain(self_address.into_iter())
+            .collect();
 
-impl fmt::Display for Peers {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        for i in self.0.iter() {
-            write!(f, "{}, \n", i.key())?
+        // Randomize peers
+        peers.shuffle(&mut rand::thread_rng());
+
+        // Return 10
+        peers.into_iter().take(10).collect()
+    }
+
+    pub fn add_peer(&self, socket: SocketAddr, peer: Peer) -> anyhow::Result<()> {
+        self.active.insert(socket, peer).ok_or_else(|| anyhow!("Address already bound to a peer."))?;
+
+        Ok(())
+    }
+
+    pub fn _add_inactive(&self, socket: SocketAddr) -> bool {
+        let res = self.inactive.insert(socket);
+        trace!("added inactive: {:?}, {:?}", self, res);
+        res
+    }
+
+    pub async fn new_conn(&self, node_tx: Sender<NodeRequest>, address: SocketAddr) -> anyhow::Result<()> {
+        if self.self_address == address {
+            return Ok(())
+        }
+
+        if !(self.contains(&address)) {
+            let stream = TcpStream::connect(address).await?;
+            let peer = Peer::new(node_tx, stream).await?;
+            log_fail!(self.add_peer(address, peer.clone()));
+            peer.send(Packet::GetPeers).await;
+        }
+
+        Ok(())
+    }
+
+    pub async fn new_stream(&self, node_tx: Sender<NodeRequest>, stream: TcpStream) -> anyhow::Result<()> {
+        let peer = Peer::new(node_tx, stream).await?;
+        peer.send(Packet::GetPeers).await;
+
+        Ok(())
+    }
+
+    pub async fn new_conns(&self, node_tx: Sender<NodeRequest>, addrs: Vec<SocketAddr>) -> anyhow::Result<()> {
+        for addr in addrs {
+            self.new_conn(node_tx.clone(), addr).await?;
         }
 
         Ok(())
     }
 }
 
-#[derive(Clone)]
+impl PartialEq for Peers {
+    fn eq(&self, other: &Self) -> bool {
+        if self.len() != other.len() {
+            return false
+        }
+        self.iter().all(|p| other.contains(p.key()))
+    }
+}
+
+impl Eq for Peers {}
+
+impl fmt::Debug for Peers {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        write!(f, "{{ active: [ ")?;
+        for i in self.active.iter() {
+            write!(f, "{} ", i.key())?
+        }
+        write!(f, "], ")?;
+
+        write!(f, "inactive: [ ")?;
+        for i in self.inactive.iter() {
+            write!(f, "{} ", i.key())?
+        }
+        write!(f, "], ")?;
+
+        write!(f, "self: [ {} ] }}", self.self_address)?;
+
+        Ok(())
+    }
+}
+
+pub type History = Arc<DashSet<AccountTransaction>>;
+
+#[derive(Clone, Debug)]
 pub struct State {
-    pub history: Arc<DashSet<AccountTransaction>>,
+    pub history: History,
     pub ledger: Ledger,
     pub peers: Peers
 }
 
 impl State {
-    pub fn new() -> State {
+    pub fn new(self_socket: SocketAddr) -> State {
         State {
             history: Arc::new(DashSet::new()),
             ledger: Ledger::new(),
-            peers: Peers::new()
+            peers: Peers::new(self_socket)
         }
-    }
-
-    pub async fn connect_to_peer(&self, address: SocketAddr) -> anyhow::Result<()> {
-        let stream = TcpStream::connect(address).await?;
-        let peer = Peer::new(self.clone(), stream).await?;
-        self.peers.insert(peer);
-
-        Ok(())
     }
 }
 
