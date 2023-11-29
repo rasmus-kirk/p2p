@@ -91,14 +91,9 @@ pub type NodeRequest = (Packet, Peer);
 #[derive(Eq, PartialEq, Clone, Hash, Decode, Encode, Debug)]
 pub enum Packet {
     GetPeers,
+    ResponseGetPeers(Vec<SocketAddr>),
     AddPeer(SocketAddr),
     Broadcast(AccountTransaction),
-    ResponseGetPeers(Vec<SocketAddr>),
-}
-
-#[derive(Eq, PartialEq, Clone, Hash, Encode, Decode)]
-pub enum RpcCall {
-    GetPeers,
 }
 
 #[derive(Clone)]

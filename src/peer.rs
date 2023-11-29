@@ -1,15 +1,16 @@
 use std::{net::SocketAddr, hash::{Hasher, Hash}, io, fmt};
 
 use bincode::{decode_from_slice, encode_into_slice, Encode};
-use tokio::{sync::mpsc::{Sender, channel, Receiver}, net::{TcpStream, tcp::{OwnedWriteHalf, OwnedReadHalf}}, io::AsyncWriteExt};
+use tokio::{sync::{mpsc::{Sender, channel, Receiver}, oneshot}, net::{TcpStream, tcp::{OwnedWriteHalf, OwnedReadHalf}}, io::AsyncWriteExt};
 use tokio::io::{AsyncRead, AsyncReadExt};
+use anyhow::anyhow;
 
 use crate::{types::*, macros::*};
 
 #[derive(Clone)]
 pub struct Peer {
     address: SocketAddr,
-    peer: Sender<Packet>,
+    peer: Sender<(Packet, Option<oneshot::Sender<Packet>>)>,
     node: Sender<NodeRequest>,
 }
 
@@ -17,7 +18,7 @@ impl Peer {
     pub async fn new(tx_node: Sender<NodeRequest>, stream: TcpStream) -> anyhow::Result<Self> {
         // Create a mpsc channel for managing writes.
         // TODO: Don't use magic numbers, use magic consts
-        let (tx_peer, rx_peer) = channel::<Packet>(1000);
+        let (tx_peer, rx_peer) = channel::<(Packet, Option<oneshot::Sender<Packet>>)>(1000);
         stream.set_nodelay(true)?;
         let (read_stream, write_stream) = stream.into_split();
 
@@ -47,17 +48,32 @@ impl Peer {
     }
 
     pub async fn send(&self, packet: Packet) {
-        log_fail!(self.peer.send(packet).await)
+        log_fail!(self.peer.send((packet, None)).await)
+    }
+
+    pub async fn get_peers(&self) -> anyhow::Result<Vec<SocketAddr>> {
+        let (tx, mut rx) = oneshot::channel::<Packet>();
+        let packet = Packet::GetPeers;
+        log_fail!(self.peer.send((packet, Some(tx))).await);
+
+        match rx.await {
+            Ok(Packet::ResponseGetPeers(x)) => Ok(x),
+            Ok(_) => Err(anyhow!("")),
+            Err(_) => Err(anyhow!(""))
+        }
     }
 
     pub fn get_address(&self) -> SocketAddr {
         self.address
     }
 
-    async fn request_handler(self, mut stream: OwnedWriteHalf, mut rx: Receiver<Packet>) {
+    async fn request_handler(self, mut stream: OwnedWriteHalf, mut rx: Receiver<(Packet, Option<oneshot::Sender<Packet>>)>) {
         loop {
             match rx.recv().await {
-                Some(req) => {
+                Some((Packet::GetPeers, Some(tx))) => {
+                    todo!()
+                }
+                Some((req, _)) => {
                     log_fail!(Self::send_internal(&mut stream, &req).await)
                 }
                 None => break,
