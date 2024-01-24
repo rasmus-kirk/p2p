@@ -67,7 +67,6 @@ impl Peer {
 
     async fn send_internal(write_stream: &mut OwnedWriteHalf, packet: &Packet) -> anyhow::Result<()> {
         let bytes = bincode::encode_to_vec(packet, bincode::config::standard())?;
-        //write_stream.writable().await?;
         write_stream.write_all(&bytes).await?;
         let to = write_stream.peer_addr()?;
 

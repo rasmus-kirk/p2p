@@ -1,18 +1,108 @@
 use std::{fmt, net::SocketAddr, sync::Arc, time::{UNIX_EPOCH, SystemTime}};
 use bincode::{Encode, Decode};
+use ed25519_dalek::{VerifyingKey, SigningKey, Signer};
 use rand::seq::SliceRandom;
 use tokio::{net::TcpStream, sync::mpsc::Sender};
 use dashmap::{DashMap, DashSet};
 use anyhow::anyhow;
 
+use base64ct::{Base64, Encoding};
+
 use crate::{*, macros::log_fail};
 
-#[derive(Eq, PartialEq, Hash, Clone, Decode, Encode)]
-pub struct Id(pub String);
+#[derive(Eq, PartialEq, Hash, Clone, Decode, Encode, Debug)]
+pub struct NodeName(pub String);
+
+#[derive(Eq, PartialEq, Hash, Clone, Copy, Decode, Encode, Debug)]
+pub struct Signature([u8; 64]);
+
+impl From<ed25519_dalek::Signature> for Signature {
+    fn from(signature: ed25519_dalek::Signature) -> Signature {
+        Signature(signature.to_bytes())
+    }
+}
+
+impl Into<ed25519_dalek::Signature> for Signature {
+    fn into(self) -> ed25519_dalek::Signature {
+        ed25519_dalek::Signature::from_bytes(&self.0)
+    }
+}
+
+#[derive(Eq, PartialEq, Clone)]
+pub struct PrivateKey(SigningKey);
+
+impl From<SigningKey> for PrivateKey {
+    fn from(key: SigningKey) -> PrivateKey {
+        PrivateKey(key)
+    }
+}
+
+impl PrivateKey {
+    pub fn sign(&self, trx: AccountTransaction) -> anyhow::Result<SignedAccountTransaction> {
+        let bytes = bincode::encode_to_vec(&trx, bincode::config::standard())?;
+        let signature = self.0.sign(&bytes);
+        Ok(SignedAccountTransaction {
+            signature: signature.into(),
+            trx
+        })
+    }
+
+    pub fn get_pk(&self) -> PublicKey {
+        self.0.verifying_key().into()
+    }
+}
+
+pub type PublicKey = Id;
+
+#[derive(Eq, PartialEq, Clone)]
+pub struct KeyPair {
+    pub public: PublicKey,
+    pub private: PrivateKey,
+}
+
+#[derive(Eq, PartialEq, Hash, Clone, Copy, Decode, Encode)]
+pub struct Id([u8; 32]);
+
+impl Id {
+    fn verify(&self, msg: &[u8], s: &Signature) -> bool {
+        let signature: ed25519_dalek::Signature = s.clone().into();
+        let res = VerifyingKey::from_bytes(&self.0).unwrap().verify_strict(msg, &signature);
+        match res {
+            Ok(_) => true,
+            Err(_) => false
+        }
+    }
+}
+
+impl From<VerifyingKey> for Id {
+    fn from(key: VerifyingKey) -> Id {
+        Id(VerifyingKey::to_bytes(&key))
+    }
+}
+
+impl FromStr for Id {
+    type Err = anyhow::Error;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        let mut bytes = [0u8; 32];
+        Base64::decode(s, &mut bytes).unwrap();
+        let key = VerifyingKey::from_bytes(&bytes)?;
+
+        Ok(key.into())
+    }
+}
+
+impl fmt::Display for Id {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        let str = Base64::encode_string(&self.0);
+        write!(f, "{:#?}", str)
+    }
+}
 
 impl fmt::Debug for Id {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        write!(f, "{}", self.0)
+        let str = Base64::encode_string(&self.0);
+        write!(f, "{:#?}", str)
     }
 }
 
@@ -66,12 +156,34 @@ impl Timestamp {
     }
 }
 
+#[derive(Eq, PartialEq, Hash, Clone, Decode, Encode, Debug)]
+pub struct SignedAccountTransaction {
+    pub signature: Signature,
+    pub trx: AccountTransaction
+}
+
+impl SignedAccountTransaction {
+    pub fn verify(&self) -> bool {
+        let bytes_res = bincode::encode_to_vec(&self.trx, bincode::config::standard());
+        let bytes = match bytes_res {
+            Ok(bs) => bs,
+            Err(_) => return false,
+        };
+        self.trx.from.verify(&bytes, &self.signature)
+    }
+}
+
 #[derive(Eq, PartialEq, Hash, Clone, Decode, Encode)]
 pub struct AccountTransaction {
     pub to: Id,
     pub from: Id,
     pub amount: Amount,
     pub timestamp: Timestamp
+}
+
+#[derive(Eq, PartialEq, Hash, Clone, Decode, Encode, Debug)]
+pub struct AccountCreation {
+    pub id: Id,
 }
 
 impl fmt::Display for AccountTransaction {
@@ -92,7 +204,7 @@ pub type NodeRequest = (Packet, Peer);
 pub enum Packet {
     GetPeers,
     AddPeer(SocketAddr),
-    Broadcast(AccountTransaction),
+    Broadcast(SignedAccountTransaction),
     ResponseGetPeers(Vec<SocketAddr>),
 }
 
@@ -144,9 +256,7 @@ impl fmt::Debug for Ledger {
 
 impl PartialEq for Ledger {
     fn eq(&self, other: &Self) -> bool {
-        if self.len() != other.len() {
-            return false
-        }
+        self.len() == other.len() &&
         self.0.iter().all(|p| other.0.get(p.key()).is_some_and(|q| q.value() == p.value()))
     }
 }
@@ -297,5 +407,3 @@ impl State {
         }
     }
 }
-
-

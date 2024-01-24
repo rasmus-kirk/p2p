@@ -2,6 +2,8 @@ use std::net::{SocketAddr, Ipv4Addr, IpAddr};
 
 use rand::Rng;
 use tokio::{net::TcpListener, sync::mpsc::{Sender, channel, Receiver}};
+use rand::rngs::OsRng;
+use ed25519_dalek::SigningKey;
 
 use crate::types::*;
 use crate::macros::*;
@@ -9,14 +11,14 @@ use crate::macros::*;
 
 #[derive(Clone)]
 pub struct Node {
-    pub id: Id,
+    pub name: NodeName,
     pub socket: SocketAddr,
     node_tx: Sender<NodeRequest>,
     pub state: State
 }
 
 impl Node {
-    pub fn new(id: &str) -> anyhow::Result<Self> {
+    pub fn new(name: &str) -> anyhow::Result<Self> {
         // Get IP and port
         let ip = IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1));
         let port = rand::thread_rng().gen_range(20000..60000);
@@ -24,7 +26,7 @@ impl Node {
         let (node_tx, node_rx) = channel::<NodeRequest>(1000);
 
         let node = Self {
-            id: Id(id.to_owned()),
+            name: NodeName(name.to_owned()),
             socket,
             node_tx,
             state: State::new(socket)
@@ -47,8 +49,8 @@ impl Node {
         self.socket
     }
 
-    pub fn get_id(&self) -> Id {
-        self.id.clone()
+    pub fn get_node_name(&self) -> NodeName {
+        self.name.clone()
     }
 
     pub fn get_history(&self) -> History {
@@ -70,7 +72,7 @@ impl Node {
             let node = self.clone();
             async move {
                 loop {
-                    trace!("{:?}-listen: Waiting for connections", node.id);
+                    trace!("{:?}-listen: Waiting for connections", node.name);
                     let (stream, addr) = skip_fail!(listener.accept().await);
 
                     info!("listen: accepted tcp stream from {:?}, handling:", addr);
@@ -86,7 +88,7 @@ impl Node {
         let node = self.clone();
         loop {
             if let Some((packet, peer)) = rx.recv().await {
-                debug!("{:?}: Received {:?} from {:?}", node.id, packet, peer);
+                debug!("{:?}: Received {:?} from {:?}", node.name, packet, peer);
                 match packet {
                     Packet::GetPeers => {
                         let peers = node.state.peers.to_vec();
@@ -117,25 +119,30 @@ impl Node {
         Ok(())
     }
 
-    pub async fn send(&self, to: Id, amount: i64) {
-        let trx = AccountTransaction {
-            to: to.clone(),
-            from: self.id.clone(),
-            amount: Amount(amount),
-            timestamp: Timestamp::since_unix().unwrap(),
-        };
-        self.broadcast(trx)
-        
+    pub fn gen_keys(&self) -> KeyPair {
+        let mut csprng = OsRng;
+        let sk = SigningKey::generate(&mut csprng);
+        let pk = sk.verifying_key();
+        KeyPair {
+            private: sk.into(),
+            public: pk.into(),
+        }
     }
 
-    fn broadcast(&self, trx: AccountTransaction) {
-        let conn = self.clone();
-        let is_trx_new = conn.state.history.insert(trx.clone());
-        
-        if is_trx_new {
-            info!("{:?}: {:}", self.id, trx);
+    pub async fn send(&self, trx: SignedAccountTransaction) {
+        self.broadcast(trx.into())
+    }
 
-            log_fail!(conn.state.ledger.update(&trx));
+    fn broadcast(&self, trx: SignedAccountTransaction) {
+        let conn = self.clone();
+
+        let is_trx_valid = trx.verify();
+        let is_trx_new = conn.state.history.insert(trx.trx.clone());
+        
+        if is_trx_new && is_trx_valid {
+            info!("{:?}: {:?}", self.name, trx);
+
+            log_fail!(conn.state.ledger.update(&trx.trx));
 
             for peer in conn.state.peers.clone_iter() {
                 let trx = trx.clone();

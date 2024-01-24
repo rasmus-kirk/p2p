@@ -74,11 +74,11 @@ async fn main() -> anyhow::Result<()> {
                 break;
             }
             Some(&":send") => {
-                verify_len!(":send", input.len(), 3);
-
-                let to = Id(input[1].to_string());
-                let amount = skip_fail!(input[2].parse());
-                node.send(to, amount).await;
+                //verify_len!(":send", input.len(), 3);
+                //let from: Id.from(input[1].to_string())
+                //let to = Id(input[2].to_string());
+                //let amount = skip_fail!(input[3].parse());
+                //node.send(to, amount).await;
             }
             Some(_) => {
                 println!("Available commands are: ':connect <ip:port>, :peers, :balances, :exit, :send <to> <amount>'");
