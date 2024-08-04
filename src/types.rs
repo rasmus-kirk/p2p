@@ -10,8 +10,14 @@ use base64ct::{Base64, Encoding};
 
 use crate::{*, macros::log_fail};
 
-#[derive(Eq, PartialEq, Hash, Clone, Decode, Encode, Debug)]
+#[derive(Eq, PartialEq, Hash, Clone, Decode, Encode)]
 pub struct NodeName(pub String);
+
+impl fmt::Debug for NodeName {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        write!(f, "{}", self.0)
+    }
+}
 
 #[derive(Eq, PartialEq, Hash, Clone, Copy, Decode, Encode, Debug)]
 pub struct Signature([u8; 64]);
@@ -156,10 +162,16 @@ impl Timestamp {
     }
 }
 
-#[derive(Eq, PartialEq, Hash, Clone, Decode, Encode, Debug)]
+#[derive(Eq, PartialEq, Hash, Clone, Decode, Encode)]
 pub struct SignedAccountTransaction {
     pub signature: Signature,
     pub trx: AccountTransaction
+}
+
+impl fmt::Debug for SignedAccountTransaction {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        write!(f, "󰱒 {:?}", self.trx)
+    }
 }
 
 impl SignedAccountTransaction {
@@ -240,6 +252,10 @@ impl Ledger {
 
         Ok(())
     }
+
+    pub fn get(&self, id: &Id) -> Option<Amount> {
+        self.0.get(id).map(|x| x.clone())
+    }
 }
 
 impl fmt::Debug for Ledger {
@@ -265,14 +281,16 @@ impl Eq for Ledger {}
 
 #[derive(Clone)]
 pub struct Peers {
+    node_name: NodeName,
     active: Arc<DashMap<SocketAddr, Peer>>,
     inactive: Arc<DashSet<SocketAddr>>,
     self_address: SocketAddr
 }
 
 impl Peers {
-    pub fn new(self_address: SocketAddr) -> Peers {
+    pub fn new(self_address: SocketAddr, node_name: NodeName) -> Peers {
         Peers {
+            node_name,
             active: Arc::new(DashMap::new()),
             inactive: Arc::new(DashSet::new()),
             self_address
@@ -334,7 +352,7 @@ impl Peers {
 
         if !(self.contains(&address)) {
             let stream = TcpStream::connect(address).await?;
-            let peer = Peer::new(node_tx, stream).await?;
+            let peer = Peer::new(node_tx, stream, self.node_name.clone()).await?;
             log_fail!(self.add_peer(address, peer.clone()));
             peer.send(Packet::GetPeers).await;
         }
@@ -343,7 +361,7 @@ impl Peers {
     }
 
     pub async fn new_stream(&self, node_tx: Sender<NodeRequest>, stream: TcpStream) -> anyhow::Result<()> {
-        let peer = Peer::new(node_tx, stream).await?;
+        let peer = Peer::new(node_tx, stream, self.node_name.clone()).await?;
         peer.send(Packet::GetPeers).await;
 
         Ok(())
@@ -399,11 +417,11 @@ pub struct State {
 }
 
 impl State {
-    pub fn new(self_socket: SocketAddr) -> State {
+    pub fn new(self_socket: SocketAddr, node_name: NodeName) -> State {
         State {
             history: Arc::new(DashSet::new()),
             ledger: Ledger::new(),
-            peers: Peers::new(self_socket)
+            peers: Peers::new(self_socket, node_name)
         }
     }
 }

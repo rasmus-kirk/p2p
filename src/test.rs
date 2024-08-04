@@ -20,22 +20,19 @@ mod tests {
         log_init();
         info!("Starting test");
 
-        let node_a = Node::new("NodeA")?;
+        let node_a = Node::new("NodeA").await?;
         info!("Accepting connections for {:?} on: {:#}", node_a.get_node_name(), node_a.socket);
-        let node_b = Node::new("NodeB")?;
+        let node_b = Node::new("NodeB").await?;
         info!("Accepting connections for {:?} on: {:#}", node_b.get_node_name(), node_b.socket);
-        let node_c = Node::new("NodeB")?;
+        let node_c = Node::new("NodeC").await?;
         info!("Accepting connections for {:?} on: {:#}", node_b.get_node_name(), node_b.socket);
 
         let a_keys = node_a.gen_keys();
         let b_keys = node_b.gen_keys();
         let c_keys = node_c.gen_keys();
-        sleep(SHORT).await;
 
         node_a.connect(node_b.get_address()).await?;
-        sleep(SHORT).await;
         node_b.connect(node_c.get_address()).await?;
-        sleep(SHORT).await;
 
         let trx_1 = AccountTransaction {
             from: a_keys.public,
@@ -51,11 +48,9 @@ mod tests {
             amount: Amount(150),
             timestamp: Timestamp::since_unix().unwrap(),
         };
-        let strx_2 = a_keys.private.sign(trx_2).unwrap();
-
+        let strx_2 = b_keys.private.sign(trx_2).unwrap();
 
         node_a.send(strx_1).await;
-        sleep(SHORT).await;
         node_b.send(strx_2).await;
         sleep(_LONG).await;
 
@@ -80,7 +75,24 @@ mod tests {
         assert!(node_a.get_ledger().len() != 0);
         assert_eq!(node_a.get_ledger(), node_b.get_ledger());
 
-        assert!(false);
+        println!("Balances:");
+        println!("Acc A: {:?}", node_a.get_balance(&a_keys.public));
+        println!("Acc B: {:?}", node_a.get_balance(&b_keys.public));
+        println!("Acc C: {:?}\n", node_a.get_balance(&c_keys.public));
+
+        assert!(node_a.get_balance(&a_keys.public) == Amount(-100));
+        assert!(node_b.get_balance(&a_keys.public) == Amount(-100));
+        assert!(node_c.get_balance(&a_keys.public) == Amount(-100));
+
+        assert!(node_a.get_balance(&b_keys.public) == Amount(-50));
+        assert!(node_b.get_balance(&b_keys.public) == Amount(-50));
+        assert!(node_c.get_balance(&b_keys.public) == Amount(-50));
+
+        assert!(node_a.get_balance(&c_keys.public) == Amount(150));
+        assert!(node_b.get_balance(&c_keys.public) == Amount(150));
+        assert!(node_c.get_balance(&c_keys.public) == Amount(150));
+
+        //assert!(false);
 
         Ok(())
     }

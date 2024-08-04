@@ -18,24 +18,22 @@ pub struct Node {
 }
 
 impl Node {
-    pub fn new(name: &str) -> anyhow::Result<Self> {
+    pub async fn new(name: &str) -> anyhow::Result<Self> {
         // Get IP and port
         let ip = IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1));
         let port = rand::thread_rng().gen_range(20000..60000);
         let socket = SocketAddr::new(ip, port);
+        let name = NodeName(name.to_owned());
         let (node_tx, node_rx) = channel::<NodeRequest>(1000);
 
         let node = Self {
-            name: NodeName(name.to_owned()),
+            state: State::new(socket, name.clone()),
+            name,
             socket,
             node_tx,
-            state: State::new(socket)
         };
 
-        tokio::spawn({
-            let node = node.clone();
-            async move { log_fail!(node.listen().await); }
-        });
+        log_fail!(node.listen().await);
         
         tokio::spawn({
             let node = node.clone();
@@ -65,6 +63,10 @@ impl Node {
         self.state.ledger.clone()
     }
 
+    pub fn get_balance(&self, id: &Id) -> Amount {
+        self.state.ledger.get(id).unwrap()
+    }
+
     pub async fn listen(&self) -> anyhow::Result<()> {
         let listener = TcpListener::bind(self.socket).await?;
 
@@ -75,7 +77,7 @@ impl Node {
                     trace!("{:?}-listen: Waiting for connections", node.name);
                     let (stream, addr) = skip_fail!(listener.accept().await);
 
-                    info!("listen: accepted tcp stream from {:?}, handling:", addr);
+                    info!("󰟅 Listener accepted tcp stream from {:?}, handling:", addr);
                     skip_fail!(node.state.peers.new_stream(node.node_tx.clone(), stream).await);
                 }
             }
@@ -140,7 +142,7 @@ impl Node {
         let is_trx_new = conn.state.history.insert(trx.trx.clone());
         
         if is_trx_new && is_trx_valid {
-            info!("{:?}: {:?}", self.name, trx);
+            info!(" {:?}: {:?}", self.name, trx);
 
             log_fail!(conn.state.ledger.update(&trx.trx));
 

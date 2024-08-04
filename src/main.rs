@@ -40,7 +40,7 @@ async fn main() -> anyhow::Result<()> {
     println!("Please type in a user name:");
     let username = prompt("");
 
-    let node= Node::new(&username)?;
+    let node= Node::new(&username).await?;
 
     sleep(Duration::from_secs(1));
 

@@ -8,13 +8,14 @@ use crate::{types::*, macros::*};
 
 #[derive(Clone)]
 pub struct Peer {
+    node_name: NodeName,
     address: SocketAddr,
     peer: Sender<Packet>,
     node: Sender<NodeRequest>,
 }
 
 impl Peer {
-    pub async fn new(tx_node: Sender<NodeRequest>, stream: TcpStream) -> anyhow::Result<Self> {
+    pub async fn new(tx_node: Sender<NodeRequest>, stream: TcpStream, node_name: NodeName) -> anyhow::Result<Self> {
         // Create a mpsc channel for managing writes.
         // TODO: Don't use magic numbers, use magic consts
         let (tx_peer, rx_peer) = channel::<Packet>(1000);
@@ -22,6 +23,7 @@ impl Peer {
         let (read_stream, write_stream) = stream.into_split();
 
         let conn = Self {
+            node_name: node_name.clone(),
             address: read_stream.peer_addr()?,
             node: tx_node.clone(),
             peer: tx_peer.clone(),
@@ -39,7 +41,7 @@ impl Peer {
         tokio::spawn({
             let conn = conn.clone();
             async move {
-                conn.listen(read_stream).await;
+                conn.listen(read_stream, node_name).await;
             }
         });
 
@@ -58,24 +60,24 @@ impl Peer {
         loop {
             match rx.recv().await {
                 Some(req) => {
-                    log_fail!(Self::send_internal(&mut stream, &req).await)
+                    log_fail!(Self::send_internal(&mut stream, &req, &self.node_name).await)
                 }
                 None => break,
             }
         }
     }
 
-    async fn send_internal(write_stream: &mut OwnedWriteHalf, packet: &Packet) -> anyhow::Result<()> {
+    async fn send_internal(write_stream: &mut OwnedWriteHalf, packet: &Packet, node_name: &NodeName) -> anyhow::Result<()> {
         let bytes = bincode::encode_to_vec(packet, bincode::config::standard())?;
         write_stream.write_all(&bytes).await?;
         let to = write_stream.peer_addr()?;
 
-        warn!("Sent: {:?} - {:#?} to {:#}", packet, bytes.len(), to);
+        info!("󰁜 {:#?}: {:?} - ({:#?}b -> {:#})", node_name, packet, bytes.len(), to);
 
         Ok(())
     }
 
-    async fn listen(self, mut read_stream: OwnedReadHalf) {
+    async fn listen(self, mut read_stream: OwnedReadHalf, node_name: NodeName) {
         loop {
             let mut buf = [0; 4096];
 
@@ -87,6 +89,7 @@ impl Peer {
                 // TODO: Remove unwraps and handle buf more elegantly
                 Ok(bytes_read) => {
                     tokio::spawn({
+                        let node_name = node_name.clone();
                         let peer = self.clone();
                         let bytes_read = bytes_read.clone();
                         let mut buf: Vec<u8> = buf.clone().into_iter().take(bytes_read).collect();
@@ -97,7 +100,7 @@ impl Peer {
                                     bincode::config::standard()
                                 ).unwrap();
 
-                                trace!("Read {:?} bytes as: {:?}", bytes_read, packet);
+                                info!("󰁂 {:?}: {:?} - ({:#?}/{:#?}b)", node_name, packet, bytes_decoded, bytes_read);
                                 peer.node.send((packet, peer.clone())).await.unwrap();
 
                                 if bytes_read != bytes_decoded && buf.len() - bytes_decoded != 0 {
